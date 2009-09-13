@@ -1,0 +1,9 @@
+all: index.html
+
+# index file
+index.html: meta.yml
+	test-daily test-summary
+
+# clean up the mess
+clean:
+	rm -f index.html index.html-new summary.json

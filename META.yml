@@ -1,0 +1,30 @@
+---
+name: Test-Daily
+version: 0.01
+author:
+  - 'Jozef Kutej <jkutej@cpan.org>'
+abstract: daily testing reports
+license: perl
+resources:
+  license: http://dev.perl.org/licenses/
+build_requires:
+  File::Temp: 0
+  Module::Build::SysPath: 0.08
+  Test::Differences: 0
+  Test::More: 0
+requires:
+  JSON::Util: 0
+configure_requires:
+  Module::Build: 0.340201
+  Module::Build::SysPath: 0.08
+provides:
+  Test::Daily:
+    file: lib/Test/Daily.pm
+    version: 0.01
+  Test::Daily::SPc:
+    file: lib/Test/Daily/SPc.pm
+    version: 0.04
+generated_by: Module::Build version 0.340201
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
