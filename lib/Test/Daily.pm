@@ -20,6 +20,24 @@ See `test-daily` script.
     
 =head1 DESCRIPTION
 
+=head1 USAGE
+
+=head2 TAP::Harness::Archive
+
+Use L<TAP::Harness::Archive> to create tarball of the test output. Simply
+install it and run F<prove> with C<--archive> option.
+
+    prove --archive name_version_arch.tar.gz
+    prove --archive test-project-name_20090927_i386.tar.gz
+
+=head2 Create pages with test output
+
+On server where the pages will be hosted (generated):
+
+    test-daily tarball test-project-name_20090927_i386.tar.gz
+    test-daily site-makefile
+    test-daily make
+
 =cut
 
 use Moose;
@@ -35,8 +53,11 @@ use Template::Constants qw( :debug );
 use TAP::Formatter::HTML '0.08';
 use TAP::Harness;
 use JSON::Util;
+use YAML::Syck ();
+use XML::LibXML;
+use HTML::Entities 'encode_entities';
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 has 'datadir' => (
     is      => 'rw',
@@ -80,10 +101,22 @@ has 'ttdir' => (
     default => sub { dir($_[0]->datadir, 'tt') },
     lazy    => 1,
 );
-has 'static_prefix' => (
+has 'ttlibdir' => (
+    is      => 'rw',
+    isa     => 'Path::Class::Dir',
+    default => sub { dir($_[0]->datadir, 'tt-lib') },
+    lazy    => 1,
+);
+has 'site_prefix' => (
     is      => 'rw',
     isa     => 'Str',
-    default => sub { $_[0]->config->{'main'}->{'static_prefix'} || '/test-server' },
+    default => sub { $_[0]->config->{'main'}->{'site_prefix'} || '/test-server' },
+    lazy    => 1,
+);
+has 'site_hostname' => (
+    is      => 'rw',
+    isa     => 'Str',
+    default => sub { $_[0]->config->{'main'}->{'site_hostname'} || 'localhost' },
     lazy    => 1,
 );
 has 'tt' => (
@@ -171,15 +204,18 @@ sub _process {
     my $self         = shift;
     my $template     = shift or die 'set template parameter';
     my $out_filename = shift or die 'set out_filename parameter';
+    my $more_tt_args = shift || {};
 
     my $tt   = $self->tt;
     
     $self->tt->process(
         $template,
         {
-            'folders' => [ $self->_all_folders ],
-            'ttdir'   => $self->ttdir,
-            'json'    => JSON::Util->new(),
+            'folders'  => [ $self->_all_folders ],
+            'ttdir'    => $self->ttdir,
+            'ttlibdir' => $self->ttlibdir,
+            'json'     => JSON::Util->new(),
+            %{$more_tt_args},
         },
         $out_filename,
     ) || die $self->tt->error(), "\n";;
@@ -220,7 +256,7 @@ sub update_project_makefile {
     my $self   = shift;
     my $folder = shift or die 'pass folder argument';
     chdir($folder);
-    $self->_process('Makefile-project.tt2', 'Makefile');
+    $self->_process('Makefile-project.tt2', 'Makefile', { 'curfolder' => $folder });
 }
 
 =head2 update_test_makefile($folder)
@@ -228,10 +264,11 @@ sub update_project_makefile {
 =cut
 
 sub update_test_makefile {
-    my $self = shift;
-    my $folder = shift or die 'pass folder argument';
+    my $self    = shift;
+    my $folder  = shift or die 'pass folder argument';
+    my $project = shift or die 'pass project name';
     chdir($folder);
-    $self->_process('Makefile-test.tt2', 'Makefile', @_);
+    $self->_process('Makefile-test.tt2', 'Makefile', { 'curfolder' => $folder, 'project' => $project });
 }
 
 =head2 update_test_summary
@@ -244,8 +281,8 @@ sub update_test_summary {
     my @tests = glob( 't/*.t' );
     my $fmt = TAP::Formatter::HTML->new;
     $fmt
-        ->js_uris([$self->config->{'main'}->{'static_prefix'}.'_td/jquery-1.3.2.js', $self->config->{'main'}->{'static_prefix'}.'_td/default_report.js' ])
-        ->css_uris([$self->config->{'main'}->{'static_prefix'}.'_td/default_page.css', $self->config->{'main'}->{'static_prefix'}.'_td/default_report.css'])
+        ->js_uris([$self->config->{'main'}->{'site_prefix'}.'_td/jquery-1.3.2.js', $self->config->{'main'}->{'site_prefix'}.'_td/default_report.js' ])
+        ->css_uris([$self->config->{'main'}->{'site_prefix'}.'_td/default_page.css', $self->config->{'main'}->{'site_prefix'}.'_td/default_report.css'])
         ->inline_css('')
         ->force_inline_css(0)
         ->inline_js('');
@@ -263,7 +300,10 @@ sub update_test_summary {
 
     # write test summary
     JSON::Util->encode(
-        { map { $_ => [ $aggregate->$_ ] } @aggregate_methods },
+        {
+            (map { $_ => [ $aggregate->$_ ] } @aggregate_methods),
+            'meta' => YAML::Syck::LoadFile('meta.yml'),
+        },
         'summary.json'
     );
     
@@ -288,6 +328,91 @@ sub update_site_summary {
     my $self = shift;
     $self->_process_summary();
     $self->_process('site.tt2', 'index.html');    
+}
+
+=head2 run_make($target)
+
+=cut
+
+sub run_make {
+    my $self = shift;
+    my $what = shift;
+    
+    system('cd '.$self->webdir->stringify.'; make'.($what ? ' '.$what : '')) and die $!;
+}
+
+=head2 summary2rssfeed
+
+=cut
+
+sub summary2rssfeed {
+    my $self = shift;
+    my $path = shift;
+    my $title = $path;
+    $title =~ s{/}{_};
+
+    $self->_process(
+        'summary2rssfeed.tt2',
+        'rss.xml',
+        {
+            'title' => $title,
+            'link'  => 'http://'.$self->site_hostname.$self->site_prefix.$path.'/',
+        }
+    );
+}
+
+=head2 aggregatefeeds
+
+=cut
+
+sub aggregatefeeds {
+    my $self  = shift;
+    my $title = shift;
+    
+    my $parser = XML::LibXML->new;
+    my $xpc = XML::LibXML::XPathContext->new();
+    
+    my @entries;
+    foreach my $folder ($self->_all_folders) {
+        my $feed = $parser->parse_file(file($folder, 'rss.xml'));
+        $xpc->registerNs('atom', 'http://www.w3.org/2005/Atom');
+        push @entries, $xpc->findnodes('/atom:feed/atom:entry', $feed);
+    }
+    @entries =
+        sort { $a->{'updated'} cmp $b->{'updated'} }
+        map {{
+            'title'   => encode_entities($xpc->findvalue('atom:title', $_), '<>&'),
+            'link'    => encode_entities($xpc->findvalue('atom:link/@href', $_), '<>&'),
+            'id'      => encode_entities($xpc->findvalue('atom:id', $_), '<>&'),
+            'updated' => encode_entities($xpc->findvalue('atom:updated', $_), '<>&'),
+            'summary' => encode_entities($xpc->findvalue('atom:summary', $_), '<>&'),
+    }} @entries;
+    my @ids = map { $_->{'id'} } @entries;
+
+    $self->_process(
+        'atom.tt2',
+        'rss.xml',
+        {
+            'title'   => $title || 'Test::Daily',
+            'link'  => 'http://'.$self->site_hostname.$self->site_prefix.($title ? $title.'/' : ''),
+            'ids'     => \@ids,
+            'entries' => \@entries,
+        }
+    );
+    
+    @entries = grep { $_->{'title'} =~ m/^FAIL \s/xms } @entries;
+    @ids = map { $_->{'id'} } @entries;
+    
+    $self->_process(
+        'atom.tt2',
+        'rss-fail.xml',
+        {
+            'title'   => $title || 'Test::Daily',
+            'link'  => 'http://'.$self->site_hostname.$self->site_prefix.($title ? $title.'/' : ''),
+            'ids'     => \@ids,
+            'entries' => \@entries,
+        }
+    );
 }
 
 
